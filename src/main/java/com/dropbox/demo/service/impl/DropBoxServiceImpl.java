@@ -1,5 +1,6 @@
 package com.dropbox.demo.service.impl;
 
+import com.dropbox.demo.dao.TokenData;
 import com.dropbox.demo.service.DropBoxService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -8,6 +9,8 @@ import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -32,25 +35,29 @@ public class DropBoxServiceImpl implements DropBoxService {
     @Value("${dropbox.memberlist.api.url}")
     private String memberApiUrl;
 
+    @Value("${dropbox.token.url}")
+    private String tokenUrl;
+
     private final WebClient webClient = WebClient.builder().build();
 
-    private final Map<String, String> basicTokenCache = new ConcurrentHashMap<>();
+    private final Map<String, TokenData> basicTokenCache = new ConcurrentHashMap<>();
 
 
     public String getAccessToken() {
         log.info("fetching token");
-        return basicTokenCache.get("dropboxAccessToken");
+        TokenData tokenData = basicTokenCache.get("dropboxTokenData");
+
+        if (tokenData.isExpired()) {
+            log.info("Token expired, attempting refresh...");
+            return refreshAccessToken();
+        }
+
+        return tokenData.getAccessToken();
     }
 
-    public String cacheAccessToken(String accessToken) {
-        basicTokenCache.put("dropboxAccessToken", accessToken);
-        log.info("Access token cached in Spring Cache");
-        return accessToken;
-    }
-
-
-    public void setAccessToken(String accessToken) {
-        cacheAccessToken(accessToken);
+    public void setTokens(TokenData tokenData) {
+        log.info("set token data");
+        basicTokenCache.put("dropboxTokenData", tokenData);
     }
 
     public Map getTeamInfo() {
@@ -88,7 +95,7 @@ public class DropBoxServiceImpl implements DropBoxService {
             return setErrorInfo();
         }
 
-        Map<String, Object> members = webClient.post()
+        return webClient.post()
                 .uri(memberApiUrl)
                 .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
                 .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
@@ -96,8 +103,55 @@ public class DropBoxServiceImpl implements DropBoxService {
                 .retrieve()
                 .bodyToMono(Map.class)
                 .block();
-
-        return members;
     }
 
+
+    private String refreshAccessToken() {
+        TokenData oldTokenData = basicTokenCache.get("dropboxTokenData");
+
+        if (Objects.isNull(oldTokenData) || Objects.isNull(oldTokenData.getRefreshToken())) {
+            throw new RuntimeException("No refresh token available. Please try to reauthorize.");
+        }
+
+        try {
+            String credentials = clientId + ":" + clientSecret;
+            String base64Credentials = Base64.getEncoder()
+                    .encodeToString(credentials.getBytes(StandardCharsets.UTF_8));
+
+            String formData = "grant_type=refresh_token" +
+                    "&refresh_token=" + oldTokenData.getRefreshToken();
+
+            Map response = webClient.post()
+                    .uri(tokenUrl)
+                    .header(HttpHeaders.AUTHORIZATION, "Basic " + base64Credentials)
+                    .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_FORM_URLENCODED_VALUE)
+                    .bodyValue(formData)
+                    .retrieve()
+                    .bodyToMono(Map.class)
+                    .block();
+
+            if (Objects.isNull(response) || !response.containsKey("access_token")) {
+                throw new RuntimeException("Failed to refresh token");
+            }
+
+            long expiresInSeconds = ((Number) response.get("expires_in")).longValue();
+            long expiryTimeMs = System.currentTimeMillis() + (expiresInSeconds * 1000);
+
+            String newRefreshToken = (String) response.get("refresh_token");
+
+            if (Objects.isNull(newRefreshToken)) {
+                newRefreshToken = oldTokenData.getRefreshToken();
+            }
+            setTokens(TokenData.builder()
+                    .accessToken((String) response.get("access_token"))
+                    .refreshToken(newRefreshToken)
+                    .expiryTime(expiryTimeMs).build());
+
+            return (String) response.get("access_token");
+
+        } catch (Exception e) {
+            System.err.println("Token refresh failed: " + e.getMessage());
+            throw new RuntimeException("Token refresh failed. Please re-authenticate.");
+        }
+    }
 }

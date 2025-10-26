@@ -1,6 +1,7 @@
 package com.dropbox.demo.controller;
 
 
+import com.dropbox.demo.dao.TokenData;
 import com.dropbox.demo.service.DropBoxService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -42,6 +43,7 @@ public class OAuthController {
         String authorizationUrl = UriComponentsBuilder.fromUriString(authUrl)
                 .queryParam("client_id", clientId)
                 .queryParam("response_type", "code")
+                .queryParam("token_access_type", "offline")
                 .queryParam("redirect_uri", "http://localhost:8080/oauth/callback")
                 .queryParam("scope", "team_info.read team_data.member members.read groups.read events.read")
                 .toUriString();
@@ -56,13 +58,20 @@ public class OAuthController {
     public Map<String, Object> callback(@RequestParam("code") String code,
                                         @RequestParam(value = "state", required = false) String state) {
         try {
-            String accessToken = exchangeCodeForToken(code);
-            dropBoxService.setAccessToken(accessToken);
+            Map tokens = exchangeCodeForToken(code);
+            long expiresInSeconds = ((Number) tokens.get("expires_in")).longValue();
+            long expiryTimeMs = System.currentTimeMillis() + (expiresInSeconds * 1000);
 
+            TokenData tokenData = TokenData.builder()
+                    .accessToken((String) tokens.get("access_token"))
+                    .refreshToken((String) tokens.get("refresh_token"))
+                    .expiryTime(expiryTimeMs).build();
+
+            dropBoxService.setTokens(tokenData);
 
             return Map.of(
                     "status", "success",
-                    "access_token", accessToken,
+                    "access_token", (String) tokens.get("access_token"),
                     "message", "Successfully authenticated with Dropbox!",
                     "next_steps", "Use this access_token to call /api/team-info and /api/members"
             );
@@ -75,7 +84,7 @@ public class OAuthController {
         }
     }
 
-    private String exchangeCodeForToken(String code) {
+    private Map exchangeCodeForToken(String code) {
         String formData = "code=" + code +
                 "&grant_type=authorization_code" +
                 "&redirect_uri=http://localhost:8080/oauth/callback" +
@@ -94,7 +103,7 @@ public class OAuthController {
             throw new RuntimeException("Failed to get access token from Dropbox. Response: " + response);
         }
 
-        return (String) response.get("access_token");
+        return response;
     }
 
 }
