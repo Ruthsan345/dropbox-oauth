@@ -1,4 +1,4 @@
-# CloudEagle - Dropbox Business Integration
+# Dropbox OAUTH Integration
 
 A Spring Boot application that integrates with Dropbox Business API to provide SaaS management capabilities. This implementation demonstrates OAuth2 authentication, API integration, and production-ready backend development.
 
